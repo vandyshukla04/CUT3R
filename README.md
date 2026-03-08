@@ -35,6 +35,11 @@ Official implementation of <strong>Continuous 3D Perception Model with Persisten
   - [Installation](#installation)
   - [Checkpoints](#download-checkpoints)
   - [Inference](#inference)
+- [Wildlife Detection Extensions](#wildlife-detection-extensions)
+  - [Directory Structure](#directory-structure)
+  - [Data Conversion](#data-conversion)
+  - [Utilities](#utilities)
+  - [Analysis Tools](#analysis-tools)
 - [Datasets](#datasets)
 - [Evaluation](#evaluation)
   - [Datasets](#datasets-1)
@@ -119,6 +124,124 @@ python demo_ga.py --model_path MODEL_PATH --seq_path SEQ_PATH --size SIZE --vis_
 Output results will be saved to `output_dir`.
 
 > Currently, we accelerate the feedforward process by processing inputs in parallel within the encoder, which results in linear memory consumption as the number of frames increases.
+
+## Wildlife Detection Extensions
+
+This repository includes custom extensions for wildlife 3D detection and tracking, built on top of CUT3R.
+
+### Directory Structure
+
+The codebase is organized into the following directories:
+
+```
+CUT3R/
+├── src/                              # Core CUT3R model implementation
+├── converters/                       # Data format conversion tools
+│   ├── unified_data_converter.py    # Unified converter (KITTI, Omni3D, Wildlife)
+│   └── README.md                    # Detailed usage documentation
+├── scripts/                          # Utility scripts
+│   ├── bbox_projection.py           # 3D to 2D projection utilities
+│   ├── draw_bboxes.py               # Bounding box visualization
+│   ├── make_video.py                # Video generation from frames
+│   └── README.md                    # Script documentation
+├── tools/                            # Analysis and debugging tools
+│   ├── explore_data.py              # Data structure exploration
+│   ├── analyze_rhino_data.py        # Dataset-specific analysis
+│   └── README.md                    # Tool documentation
+├── semantic_face_propagator.py      # Semantic face tracking for 3D boxes
+├── demo_masks.py                    # Enhanced demo with 3D detection
+├── demo_masks_rhino_sec_data.py     # Dataset-specific demo variants
+├── demo_masks_zeb_KABR_data.py      #
+├── viser_utils.py                   # Enhanced 3D visualization
+└── ...
+```
+
+### Data Conversion
+
+Convert CUT3R wildlife detection outputs to standard 3D detection formats:
+
+**KITTI/MMDetection3D Format:**
+```bash
+python converters/unified_data_converter.py --format kitti \
+  --videos-root examples/wd_data/rhinos \
+  --results-root results \
+  --output-dir data/rhino_kitti \
+  --target-class rhino
+```
+
+**Omni3D Format (for Cube R-CNN):**
+```bash
+python converters/unified_data_converter.py --format omni3d \
+  --videos-root examples/wd_data/rhinos \
+  --results-root results \
+  --output-dir data/omni3d \
+  --omni3d-image-output data/omni3d_images \
+  --target-class rhino
+```
+
+**Wildlife Info Files (for MMDetection3D):**
+```bash
+python converters/unified_data_converter.py --format wildlife_info \
+  --output-dir data/rhino_kitti
+```
+
+See [converters/README.md](converters/README.md) for detailed documentation.
+
+### Utilities
+
+**Visualize Detections:**
+```bash
+# Draw bounding boxes on images
+python scripts/draw_bboxes.py \
+  --input-dir results/detections \
+  --output-dir results/visualizations
+
+# Create video from frames
+python scripts/make_video.py \
+  --input-dir results/frames \
+  --output results/video.mp4 \
+  --fps 30
+```
+
+See [scripts/README.md](scripts/README.md) for more examples.
+
+### Analysis Tools
+
+**Explore Data Structure:**
+```bash
+# Explore CUT3R output structure
+python tools/explore_data.py --data-dir results/tmp-video1
+
+# Analyze rhino dataset
+python tools/analyze_rhino_data.py \
+  --videos-dir examples/wd_data/rhinos \
+  --results-dir results \
+  --output-report analysis.json
+```
+
+See [tools/README.md](tools/README.md) for detailed usage.
+
+### Semantic Face Propagation
+
+Track semantic faces (front/back/left/right/top/bottom) of 3D bounding boxes through video sequences:
+
+```bash
+python semantic_face_propagator.py \
+  --input-dir results/video1 \
+  --output-dir results/semantic_faces
+```
+
+### Enhanced Demo with 3D Detection
+
+Run demo with Grounded-SAM integration and 3D bounding box fitting:
+
+```bash
+python demo_masks.py \
+  --model_path src/cut3r_512_dpt_4_64.pth \
+  --seq_path examples/wildlife_video \
+  --size 512 \
+  --output_dir results/wildlife_detection
+```
 
 ## Datasets
 Our training data includes 32 datasets listed below. We provide processing scripts for all of them. Please download the datasets from their official sources, and refer to [preprocess.md](docs/preprocess.md) for processing scripts and more information about the datasets.

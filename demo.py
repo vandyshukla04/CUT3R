@@ -420,3 +420,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python demo.py --model_path src/cut3r_512_dpt_4_64.pth --size 512 \
+#     --seq_path examples/zebr --vis_threshold 1.5 --output_dir tmp
+
+# python demo.py --model_path src/cut3r_512_dpt_4_64.pth --size 512 \
+#     --seq_path examples/zebr --vis_threshold 1.5 --output_dir tmp

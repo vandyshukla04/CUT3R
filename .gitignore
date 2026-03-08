@@ -11,6 +11,7 @@ build/
 develop-eggs/
 dist/
 eggs/
+examples/
 lib/
 lib64/
 parts/
@@ -53,3 +54,12 @@ docs/_build/
 *.pth
 data
 src/checkpoints
+
+# debug vandi
+demo_*
+debug_*
+tmp*
+
+results/*
+test/*
+scripts/*

@@ -299,3 +299,220 @@ def apply_mask(img, msk):
     img = img.copy()
     img[msk] = 0
     return img
+
+
+class GPSConstrainedPointCloudOptimizer(PointCloudOptimizer):
+    """PointCloudOptimizer with GPS constraints for improved camera path estimation.
+
+    Uses scale-invariant GPS constraints:
+    - Displacement ratios: Relative distances between frames
+    - Velocity directions: Normalized motion direction vectors
+    - Heading changes: Angular changes in movement direction
+    """
+
+    def __init__(
+        self,
+        *args,
+        gps_data=None,
+        gps_weight=0.1,
+        gps_velocity_weight=0.05,
+        gps_heading_weight=0.05,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.gps_data = gps_data
+        self.gps_weight = gps_weight
+        self.gps_velocity_weight = gps_velocity_weight
+        self.gps_heading_weight = gps_heading_weight
+
+        # Precompute GPS constraints if data is available
+        self.gps_constraints = None
+        if gps_data is not None and len(gps_data) >= 2:
+            self._precompute_gps_constraints()
+
+    def _precompute_gps_constraints(self):
+        """Precompute GPS constraints from GPS data."""
+        from dust3r.utils.gps import compute_gps_constraints, compute_gimbal_yaw_changes
+
+        self.gps_constraints = compute_gps_constraints(
+            self.gps_data,
+            device=self.device,
+            min_displacement=0.1  # meters
+        )
+
+        if self.gps_constraints is not None:
+            # Also compute gimbal yaw changes for hovering fallback
+            self.gimbal_yaw_changes = compute_gimbal_yaw_changes(
+                self.gps_data,
+                device=self.device
+            )
+
+            is_hovering = self.gps_constraints.get('is_hovering', False)
+            total_disp = self.gps_constraints.get('total_displacement', 0)
+            if self.verbose:
+                print(f"GPS constraints initialized:")
+                print(f"  - Total displacement: {total_disp:.2f}m")
+                print(f"  - Is hovering: {is_hovering}")
+                print(f"  - GPS weight: {self.gps_weight}")
+                print(f"  - Velocity weight: {self.gps_velocity_weight}")
+                print(f"  - Heading weight: {self.gps_heading_weight}")
+
+    def _compute_displacement_ratio_loss(self):
+        """Compute loss comparing predicted vs GPS displacement ratios.
+
+        This is scale-invariant: we compare relative distances, not absolute ones.
+        """
+        if self.gps_constraints is None:
+            return 0.0
+
+        gps_ratios = self.gps_constraints.get('displacement_ratios')
+        if gps_ratios is None or len(gps_ratios) < 1:
+            return 0.0
+
+        # Get camera positions from poses
+        im_poses = self.get_im_poses()  # [N, 4, 4] cam-to-world
+        translations = im_poses[:, :3, 3]  # [N, 3]
+
+        # Match frame IDs to pose indices
+        # Assuming poses are in the same order as frame_ids
+        n_poses = min(len(translations), len(gps_ratios) + 1)
+        if n_poses < 2:
+            return 0.0
+
+        # Compute predicted displacements (XY only - ignore Z for zoomed video)
+        pred_displacements = []
+        for i in range(1, n_poses):
+            d_xy = torch.norm(translations[i, :2] - translations[i-1, :2])
+            pred_displacements.append(d_xy)
+
+        pred_displacements = torch.stack(pred_displacements)
+        total_pred = pred_displacements.sum() + 1e-8
+
+        # Compute predicted ratios
+        pred_ratios = pred_displacements / total_pred
+
+        # Compute loss as L1 difference in ratios
+        n_compare = min(len(pred_ratios), len(gps_ratios))
+        loss = torch.abs(pred_ratios[:n_compare] - gps_ratios[:n_compare]).mean()
+
+        return loss
+
+    def _compute_velocity_direction_loss(self):
+        """Compute loss comparing predicted vs GPS velocity directions.
+
+        Uses cosine similarity between normalized velocity vectors.
+        """
+        if self.gps_constraints is None:
+            return 0.0
+
+        gps_directions = self.gps_constraints.get('velocity_directions')
+        if gps_directions is None or len(gps_directions) < 1:
+            return 0.0
+
+        # Get camera positions from poses
+        im_poses = self.get_im_poses()
+        translations = im_poses[:, :3, 3]
+
+        n_poses = min(len(translations), len(gps_directions) + 1)
+        if n_poses < 2:
+            return 0.0
+
+        # Compute predicted velocity directions (XY only)
+        pred_velocities = translations[1:n_poses, :2] - translations[:n_poses-1, :2]
+        pred_magnitudes = torch.norm(pred_velocities, dim=1, keepdim=True)
+        pred_directions = pred_velocities / (pred_magnitudes + 1e-8)
+
+        # Compute cosine similarity loss (1 - cos_sim)
+        n_compare = min(len(pred_directions), len(gps_directions))
+        gps_dirs = gps_directions[:n_compare]
+
+        # Only compute loss for frames with significant GPS movement
+        gps_magnitudes = torch.norm(gps_dirs, dim=1)
+        valid_mask = gps_magnitudes > 0.1  # GPS direction is valid
+
+        if valid_mask.sum() == 0:
+            return 0.0
+
+        cos_sim = (pred_directions[:n_compare] * gps_dirs).sum(dim=1)
+        loss = (1 - cos_sim)[valid_mask].mean()
+
+        return loss
+
+    def _compute_heading_change_loss(self):
+        """Compute loss comparing predicted vs GPS heading changes.
+
+        Heading changes are angular, so scale-invariant.
+        For hovering, uses gimbal yaw changes as fallback.
+        """
+        is_hovering = self.gps_constraints is not None and self.gps_constraints.get('is_hovering', False)
+
+        if is_hovering and self.gimbal_yaw_changes is not None:
+            # Use gimbal yaw changes directly
+            gps_heading_changes = self.gimbal_yaw_changes
+        elif self.gps_constraints is not None:
+            gps_heading_changes = self.gps_constraints.get('heading_changes')
+        else:
+            return 0.0
+
+        if gps_heading_changes is None or len(gps_heading_changes) < 1:
+            return 0.0
+
+        # Get camera rotations from poses
+        im_poses = self.get_im_poses()
+        rotations = im_poses[:, :3, :3]
+
+        n_poses = min(len(rotations), len(gps_heading_changes) + 2)
+        if n_poses < 3:
+            return 0.0
+
+        # Compute predicted heading changes from rotation matrices
+        pred_heading_changes = []
+        for i in range(2, n_poses):
+            R_prev = rotations[i-1]
+            R_curr = rotations[i]
+            R_rel = R_curr @ R_prev.T
+
+            # Extract yaw angle from relative rotation (rotation around Z-axis)
+            pred_yaw = torch.atan2(R_rel[1, 0], R_rel[0, 0])
+            pred_heading_changes.append(pred_yaw)
+
+        if len(pred_heading_changes) == 0:
+            return 0.0
+
+        pred_heading_changes = torch.stack(pred_heading_changes)
+
+        # Compute angular difference loss (handle wraparound)
+        n_compare = min(len(pred_heading_changes), len(gps_heading_changes))
+        angular_diff = pred_heading_changes[:n_compare] - gps_heading_changes[:n_compare]
+
+        # Normalize to [-pi, pi]
+        angular_diff = torch.atan2(torch.sin(angular_diff), torch.cos(angular_diff))
+        loss = torch.abs(angular_diff).mean()
+
+        return loss
+
+    def forward(self):
+        """Forward pass with GPS constraints added to the alignment loss."""
+        # Get base alignment loss
+        base_loss = super().forward()
+
+        # Add GPS constraints if available
+        gps_loss = 0.0
+        if self.gps_constraints is not None:
+            # Displacement ratio loss (scale-invariant)
+            if self.gps_weight > 0:
+                disp_loss = self._compute_displacement_ratio_loss()
+                gps_loss = gps_loss + self.gps_weight * disp_loss
+
+            # Velocity direction loss
+            if self.gps_velocity_weight > 0:
+                vel_loss = self._compute_velocity_direction_loss()
+                gps_loss = gps_loss + self.gps_velocity_weight * vel_loss
+
+            # Heading change loss
+            if self.gps_heading_weight > 0:
+                head_loss = self._compute_heading_change_loss()
+                gps_loss = gps_loss + self.gps_heading_weight * head_loss
+
+        return base_loss + gps_loss

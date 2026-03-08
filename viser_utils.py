@@ -23,12 +23,7 @@ from src.dust3r.viz import (
 
 
 def todevice(batch, device, callback=None, non_blocking=False):
-    """Transfer some variables to another device (i.e. GPU, CPU:torch, CPU:numpy).
-
-    batch: list, tuple, dict of tensors or other things
-    device: pytorch device or 'numpy'
-    callback: function that would be called on every sub-elements.
-    """
+    """Transfer some variables to another device (i.e. GPU, CPU:torch, CPU:numpy)."""
     if callback:
         batch = callback(batch)
 
@@ -57,112 +52,6 @@ def to_numpy(x):
     return todevice(x, "numpy")
 
 
-def segment_sky(image):
-    import cv2
-    from scipy import ndimage
-
-    # Convert to HSV
-    image = to_numpy(image)
-    if np.issubdtype(image.dtype, np.floating):
-        image = np.uint8(255 * image.clip(min=0, max=1))
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-    # Define range for blue color and create mask
-    lower_blue = np.array([0, 0, 100])
-    upper_blue = np.array([30, 255, 255])
-    mask = cv2.inRange(hsv, lower_blue, upper_blue).view(bool)
-
-    # add luminous gray
-    mask |= (hsv[:, :, 1] < 10) & (hsv[:, :, 2] > 150)
-    mask |= (hsv[:, :, 1] < 30) & (hsv[:, :, 2] > 180)
-    mask |= (hsv[:, :, 1] < 50) & (hsv[:, :, 2] > 220)
-
-    # Morphological operations
-    kernel = np.ones((5, 5), np.uint8)
-    mask2 = ndimage.binary_opening(mask, structure=kernel)
-
-    # keep only largest CC
-    _, labels, stats, _ = cv2.connectedComponentsWithStats(
-        mask2.view(np.uint8), connectivity=8
-    )
-    cc_sizes = stats[1:, cv2.CC_STAT_AREA]
-    order = cc_sizes.argsort()[::-1]  # bigger first
-    i = 0
-    selection = []
-    while i < len(order) and cc_sizes[order[i]] > cc_sizes[order[0]] / 2:
-        selection.append(1 + order[i])
-        i += 1
-    mask3 = np.in1d(labels, selection).reshape(labels.shape)
-
-    # Apply mask
-    return torch.from_numpy(mask3)
-
-
-def convert_scene_output_to_glb(
-    outdir,
-    imgs,
-    pts3d,
-    mask,
-    focals,
-    cams2world,
-    cam_size=0.05,
-    show_cam=True,
-    cam_color=None,
-    as_pointcloud=False,
-    transparent_cams=False,
-    silent=False,
-    save_name=None,
-):
-    assert len(pts3d) == len(mask) <= len(imgs) <= len(cams2world) == len(focals)
-    pts3d = to_numpy(pts3d)
-    imgs = to_numpy(imgs)
-    focals = to_numpy(focals)
-    cams2world = to_numpy(cams2world)
-
-    scene = trimesh.Scene()
-
-    # full pointcloud
-    if as_pointcloud:
-        pts = np.concatenate([p[m] for p, m in zip(pts3d, mask)])
-        col = np.concatenate([p[m] for p, m in zip(imgs, mask)])
-        pct = trimesh.PointCloud(pts.reshape(-1, 3), colors=col.reshape(-1, 3))
-        scene.add_geometry(pct)
-    else:
-        meshes = []
-        for i in range(len(imgs)):
-            meshes.append(pts3d_to_trimesh(imgs[i], pts3d[i], mask[i]))
-        mesh = trimesh.Trimesh(**cat_meshes(meshes))
-        scene.add_geometry(mesh)
-
-    # add each camera
-    if show_cam:
-        for i, pose_c2w in enumerate(cams2world):
-            if isinstance(cam_color, list):
-                camera_edge_color = cam_color[i]
-            else:
-                camera_edge_color = cam_color or CAM_COLORS[i % len(CAM_COLORS)]
-            add_scene_cam(
-                scene,
-                pose_c2w,
-                camera_edge_color,
-                None if transparent_cams else imgs[i],
-                focals[i],
-                imsize=imgs[i].shape[1::-1],
-                screen_width=cam_size,
-            )
-
-    rot = np.eye(4)
-    rot[:3, :3] = Rotation.from_euler("y", np.deg2rad(180)).as_matrix()
-    scene.apply_transform(np.linalg.inv(cams2world[0] @ OPENGL @ rot))
-    if save_name is None:
-        save_name = "scene"
-    outfile = os.path.join(outdir, save_name + ".glb")
-    if not silent:
-        print("(exporting 3D scene to", outfile, ")")
-    scene.export(file_obj=outfile)
-    return outfile
-
-
 @dataclasses.dataclass
 class CameraState(object):
     fov: float
@@ -182,147 +71,9 @@ class CameraState(object):
         return K
 
 
-def get_vertical_colorbar(h, vmin, vmax, cmap_name="jet", label=None, cbar_precision=2):
-    """
-    :param w: pixels
-    :param h: pixels
-    :param vmin: min value
-    :param vmax: max value
-    :param cmap_name:
-    :param label
-    :return:
-    """
-    fig = Figure(figsize=(2, 8), dpi=100)
-    fig.subplots_adjust(right=1.5)
-    canvas = FigureCanvasAgg(fig)
-
-    ax = fig.add_subplot(111)
-    cmap = cm.get_cmap(cmap_name)
-    norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-
-    tick_cnt = 6
-    tick_loc = np.linspace(vmin, vmax, tick_cnt)
-    cb1 = mpl.colorbar.ColorbarBase(
-        ax, cmap=cmap, norm=norm, ticks=tick_loc, orientation="vertical"
-    )
-
-    tick_label = [str(np.round(x, cbar_precision)) for x in tick_loc]
-    if cbar_precision == 0:
-        tick_label = [x[:-2] for x in tick_label]
-
-    cb1.set_ticklabels(tick_label)
-
-    cb1.ax.tick_params(labelsize=18, rotation=0)
-    if label is not None:
-        cb1.set_label(label)
-
-    canvas.draw()
-    s, (width, height) = canvas.print_to_buffer()
-
-    im = np.frombuffer(s, np.uint8).reshape((height, width, 4))
-
-    im = im[:, :, :3].astype(np.float32) / 255.0
-    if h != im.shape[0]:
-        w = int(im.shape[1] / im.shape[0] * h)
-        im = cv2.resize(im, (w, h), interpolation=cv2.INTER_AREA)
-
-    return im
-
-
-def colorize_np(
-    x,
-    cmap_name="jet",
-    mask=None,
-    range=None,
-    append_cbar=False,
-    cbar_in_image=False,
-    cbar_precision=2,
-):
-    """
-    turn a grayscale image into a color image
-    :param x: input grayscale, [H, W]
-    :param cmap_name: the colorization method
-    :param mask: the mask image, [H, W]
-    :param range: the range for scaling, automatic if None, [min, max]
-    :param append_cbar: if append the color bar
-    :param cbar_in_image: put the color bar inside the image to keep the output image the same size as the input image
-    :return: colorized image, [H, W]
-    """
-    if range is not None:
-        vmin, vmax = range
-    elif mask is not None:
-
-        vmin = np.min(x[mask][np.nonzero(x[mask])])
-        vmax = np.max(x[mask])
-
-        x[np.logical_not(mask)] = vmin
-
-    else:
-        vmin, vmax = np.percentile(x, (1, 100))
-        vmax += 1e-6
-
-    x = np.clip(x, vmin, vmax)
-    x = (x - vmin) / (vmax - vmin)
-
-    cmap = cm.get_cmap(cmap_name)
-    x_new = cmap(x)[:, :, :3]
-
-    if mask is not None:
-        mask = np.float32(mask[:, :, np.newaxis])
-        x_new = x_new * mask + np.ones_like(x_new) * (1.0 - mask)
-
-    cbar = get_vertical_colorbar(
-        h=x.shape[0],
-        vmin=vmin,
-        vmax=vmax,
-        cmap_name=cmap_name,
-        cbar_precision=cbar_precision,
-    )
-
-    if append_cbar:
-        if cbar_in_image:
-            x_new[:, -cbar.shape[1] :, :] = cbar
-        else:
-            x_new = np.concatenate(
-                (x_new, np.zeros_like(x_new[:, :5, :]), cbar), axis=1
-            )
-        return x_new
-    else:
-        return x_new
-
-
-def colorize(
-    x, cmap_name="jet", mask=None, range=None, append_cbar=False, cbar_in_image=False
-):
-    """
-    turn a grayscale image into a color image
-    :param x: torch.Tensor, grayscale image, [H, W] or [B, H, W]
-    :param mask: torch.Tensor or None, mask image, [H, W] or [B, H, W] or None
-    """
-
-    device = x.device
-    x = x.cpu().numpy()
-    if mask is not None:
-        mask = mask.cpu().numpy() > 0.99
-        kernel = np.ones((3, 3), np.uint8)
-
-    if x.ndim == 2:
-        x = x[None]
-        if mask is not None:
-            mask = mask[None]
-
-    out = []
-    for x_ in x:
-        if mask is not None:
-            mask = cv2.erode(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
-
-        x_ = colorize_np(x_, cmap_name, mask, range, append_cbar, cbar_in_image)
-        out.append(torch.from_numpy(x_).to(device).float())
-    out = torch.stack(out).squeeze(0)
-    return out
-
-
-class PointCloudViewer:
+class Enhanced3DPointCloudViewer:
+    """Enhanced Point Cloud Viewer with 3D Bounding Box Support"""
+    
     def __init__(
         self,
         model,
@@ -337,17 +88,41 @@ class PointCloudViewer:
         port=8080,
         show_camera=True,
         vis_threshold=1,
-        size=512
+        size=512,
+        visualization_modes=None,
+        bounding_boxes=None  # NEW: 3D bounding boxes
     ):
         self.model = model
-        self.size=size
+        self.size = size
         self.state_args = state_args
+        self.port = port
         self.server = viser.ViserServer(port=port)
         self.server.set_up_direction("-y")
         self.device = device
         self.conf_list = conf_list
         self.vis_threshold = vis_threshold
         self.tt = lambda x: torch.from_numpy(x).float().to(device)
+        
+        # Enhanced features
+        self.visualization_modes = visualization_modes
+        self.bounding_boxes = bounding_boxes  # List of lists of BoundingBox3D objects
+        self.current_viz_mode = 'original'
+        self.mask_mode_enabled = visualization_modes is not None
+        self.bbox_mode_enabled = bounding_boxes is not None
+        
+        # Colors for different classes
+        self.class_colors = {
+            'zebra': [1.0, 0.6, 0.2],    # Bright orange
+            'ground': [0.2, 1.0, 0.2],   # Bright green
+            'sky': [0.3, 0.7, 1.0],      # Bright blue
+            'person': [1.0, 0.2, 0.6],   # Bright pink
+            'car': [0.8, 0.2, 1.0],      # Purple
+            'building': [1.0, 1.0, 0.2], # Yellow
+            'tree': [0.0, 0.8, 0.4],     # Forest green
+            'rhino': [0.9, 0.5, 0.1],    # Orange-brown
+            'rhinoceros': [0.9, 0.5, 0.1], # Same as rhino
+        }
+        
         self.pcs, self.all_steps = self.read_data(
             pc_list, color_list, conf_list, edge_color_list
         )
@@ -361,6 +136,19 @@ class PointCloudViewer:
         self.orig_img_list = [x[0] for x in color_list]
         self.via_points = []
 
+        # Setup enhanced GUI
+        self._setup_enhanced_gui()
+        
+        self.pc_handles = []
+        self.cam_handles = []
+        self.bbox_handles = []  # NEW: For bounding box visualization
+        self.label_handles = []  # NEW: For floating labels
+        
+        self.server.on_client_connect(self._connect_client)
+    
+    def _setup_enhanced_gui(self):
+        """Setup enhanced GUI with mask and bounding box controls"""
+        
         gui_reset_up = self.server.gui.add_button(
             "Reset up direction",
             hint="Set the camera control 'up' direction to the current camera's 'up'.",
@@ -387,6 +175,7 @@ class PointCloudViewer:
         def _(event: viser.GuiEvent) -> None:
             self.fourd = False
 
+        # Original controls
         self.focal_slider = self.server.add_gui_slider(
             "Focal Length",
             min=0.1,
@@ -409,9 +198,128 @@ class PointCloudViewer:
             step=0.01,
             initial_value=0.1,
         )
+        
+        # NEW: Mask visualization controls
+        if self.mask_mode_enabled:
+            with self.server.gui.add_folder("🎨 Mask Visualization", expand_by_default=True):
+                self.viz_mode_text = self.server.gui.add_text(
+                    "Current Mode", 
+                    initial_value=f"🎯 {self.current_viz_mode.title()}"
+                )
+                
+                # Visualization mode buttons
+                self.original_button = self.server.gui.add_button("📷 Original Colors")
+                self.overlay_button = self.server.gui.add_button("🎨 Mask Overlay") 
+                self.highlight_button = self.server.gui.add_button("✨ Mask Highlight")
+                self.mask_only_button = self.server.gui.add_button("🎯 Masks Only")
+                
+                # Blend strength slider
+                self.blend_alpha_slider = self.server.add_gui_slider(
+                    "Overlay Strength",
+                    min=0.0,
+                    max=1.0,
+                    step=0.05,
+                    initial_value=0.6,
+                )
+                
+                # Instance info
+                if 'instance_labels' in self.visualization_modes:
+                    total_instances = 0
+                    total_masked_points = 0
+                    for labels in self.visualization_modes['instance_labels']:
+                        unique_labels = np.unique(labels)
+                        total_instances += len(unique_labels[unique_labels > 0])
+                        total_masked_points += np.sum(labels > 0)
+                    
+                    self.instance_info = self.server.gui.add_text(
+                        "Instances Detected",
+                        initial_value=f"🔍 {total_instances} instances, {total_masked_points:,} points"
+                    )
+                
+                # Setup mask button callbacks
+                self.original_button.on_click(lambda _: self._switch_visualization_mode('original'))
+                self.overlay_button.on_click(lambda _: self._switch_visualization_mode('overlay')) 
+                self.highlight_button.on_click(lambda _: self._switch_visualization_mode('highlight'))
+                self.mask_only_button.on_click(lambda _: self._switch_visualization_mode('mask_only'))
+                
+                @self.blend_alpha_slider.on_update
+                def _(_) -> None:
+                    if self.current_viz_mode in ['overlay', 'highlight']:
+                        self._refresh_visualization()
 
-        self.pc_handles = []
-        self.cam_handles = []
+        # NEW: 3D Bounding Box controls
+        if self.bbox_mode_enabled:
+            with self.server.gui.add_folder("📦 3D Bounding Boxes", expand_by_default=True):
+                # Count total bounding boxes
+                total_bboxes = sum(len(frame_bboxes) for frame_bboxes in self.bounding_boxes)
+                self.bbox_info = self.server.gui.add_text(
+                    "Bounding Boxes",
+                    initial_value=f"📦 {total_bboxes} 3D bounding boxes detected"
+                )
+                
+                # Show/hide bounding boxes
+                self.show_bboxes = self.server.gui.add_checkbox(
+                    "Show Bounding Boxes", initial_value=True
+                )
+                
+                # Show/hide class labels
+                self.show_labels = self.server.gui.add_checkbox(
+                    "Show Class Labels", initial_value=True
+                )
+                
+                # Box line thickness
+                self.bbox_thickness_slider = self.server.add_gui_slider(
+                    "Box Line Thickness",
+                    min=0.001,
+                    max=0.02,
+                    step=0.001,
+                    initial_value=0.005,
+                )
+                
+                # Box transparency
+                self.bbox_opacity_slider = self.server.add_gui_slider(
+                    "Box Opacity",
+                    min=0.1,
+                    max=1.0,
+                    step=0.05,
+                    initial_value=0.8,
+                )
+                
+                # Class filtering (checkboxes for each detected class)
+                detected_classes = set()
+                for frame_bboxes in self.bounding_boxes:
+                    for bbox in frame_bboxes:
+                        detected_classes.add(bbox.class_name)
+                
+                if detected_classes:
+                    with self.server.gui.add_folder("🏷️ Filter by Class", expand_by_default=False):
+                        self.class_checkboxes = {}
+                        for class_name in sorted(detected_classes):
+                            self.class_checkboxes[class_name] = self.server.gui.add_checkbox(
+                                f"Show {class_name.title()}", initial_value=True
+                            )
+                
+                # Callbacks for bounding box controls
+                @self.show_bboxes.on_update
+                def _(_) -> None:
+                    self._refresh_bboxes()
+                
+                @self.show_labels.on_update
+                def _(_) -> None:
+                    self._refresh_bboxes()
+                
+                @self.bbox_thickness_slider.on_update
+                def _(_) -> None:
+                    self._refresh_bboxes()
+                
+                @self.bbox_opacity_slider.on_update
+                def _(_) -> None:
+                    self._refresh_bboxes()
+                
+                # Setup class filter callbacks
+                if hasattr(self, 'class_checkboxes'):
+                    for checkbox in self.class_checkboxes.values():
+                        checkbox.on_update(lambda _: self._refresh_bboxes())
 
         @self.psize_slider.on_update
         def _(_) -> None:
@@ -423,8 +331,192 @@ class PointCloudViewer:
             for handle in self.cam_handles:
                 handle.scale = self.camsize_slider.value
                 handle.line_thickness = 0.03 * handle.scale
+    
+    def _switch_visualization_mode(self, mode):
+        """Switch between different visualization modes"""
+        print(f"🎨 Switching to {mode} visualization mode...")
+        
+        self.current_viz_mode = mode
+        self.viz_mode_text.value = f"🎯 {mode.title().replace('_', ' ')}"
+        
+        # Update all point clouds with new colors
+        self._refresh_visualization()
+        
+        print(f"✅ Switched to {mode} mode")
+    
+    def _refresh_visualization(self):
+        """Refresh the visualization with current mode"""
+        if not self.mask_mode_enabled:
+            return
 
-        self.server.on_client_connect(self._connect_client)
+        # Clear existing point cloud handles (safely handle already-removed nodes)
+        for handle in self.pc_handles:
+            try:
+                handle.remove()
+            except (KeyError, RuntimeError):
+                pass  # Node was already removed
+        self.pc_handles.clear()
+        
+        # Re-add point clouds with current visualization mode
+        for i, step in enumerate(self.all_steps):
+            if hasattr(self, 'frame_nodes') and len(self.frame_nodes) > i:
+                # Only update if frames are initialized
+                self._add_pc_with_mode(step, current_mode=self.current_viz_mode)
+    
+    def _refresh_bboxes(self):
+        """Refresh bounding box visualization"""
+        if not self.bbox_mode_enabled:
+            return
+
+        # Clear existing bbox handles (safely handle already-removed nodes)
+        for handle in self.bbox_handles:
+            try:
+                handle.remove()
+            except (KeyError, RuntimeError):
+                pass  # Node was already removed
+        for handle in self.label_handles:
+            try:
+                handle.remove()
+            except (KeyError, RuntimeError):
+                pass  # Node was already removed
+        self.bbox_handles.clear()
+        self.label_handles.clear()
+        
+        # Re-add bounding boxes for current frame
+        if hasattr(self, 'frame_nodes'):
+            for i, step in enumerate(self.all_steps):
+                if len(self.frame_nodes) > i and self.frame_nodes[i].visible:
+                    self._add_bboxes_for_frame(step)
+    
+    def _get_colors_for_mode(self, step, mode):
+        """Get colors for a specific visualization mode"""
+        if not self.mask_mode_enabled:
+            return self.pcs[step]["color"]
+        
+        frame_idx = step  # Assuming step corresponds to frame index
+        
+        if mode == 'original':
+            return self.visualization_modes['original_colors'][frame_idx]
+        elif mode == 'overlay':
+            return self.visualization_modes['overlay_colors'][frame_idx]
+        elif mode == 'highlight':
+            return self.visualization_modes['highlight_colors'][frame_idx]
+        elif mode == 'mask_only':
+            return self.visualization_modes['mask_only_colors'][frame_idx]
+        else:
+            return self.pcs[step]["color"]  # Fallback
+    
+    def _add_pc_with_mode(self, step, current_mode=None):
+        """Add point cloud with specified visualization mode"""
+        if current_mode is None:
+            current_mode = self.current_viz_mode
+            
+        pc = self.pcs[step]["pc"]
+        
+        # Get colors based on current mode
+        if self.mask_mode_enabled:
+            color = self._get_colors_for_mode(step, current_mode)
+        else:
+            color = self.pcs[step]["color"]
+            
+        conf = self.pcs[step]["conf"]
+        edge_color = self.pcs[step].get("edge_color", None)
+
+        pred_pts, color = self.parse_pc_data(
+            pc, color, conf, edge_color, set_border_color=True
+        )
+
+        self.vis_pts_list.append(pred_pts)
+        self.pc_handles.append(
+            self.server.add_point_cloud(
+                name=f"/frames/{step}/pred_pts",
+                points=pred_pts,
+                colors=color,
+                point_size=self.psize_slider.value,
+            )
+        )
+    
+    def _get_class_color(self, class_name):
+        """Get color for a class"""
+        if class_name.lower() in self.class_colors:
+            return self.class_colors[class_name.lower()]
+        else:
+            # Generate color based on hash
+            hash_val = hash(class_name.lower()) % 1000
+            return [
+                (hash_val * 0.618) % 1.0,
+                ((hash_val * 0.618) * 2) % 1.0,
+                ((hash_val * 0.618) * 3) % 1.0
+            ]
+    
+    def _add_bboxes_for_frame(self, step):
+        """Add 3D bounding boxes for a specific frame"""
+        if not self.bbox_mode_enabled or not self.show_bboxes.value:
+            return
+            
+        frame_idx = step
+        if frame_idx >= len(self.bounding_boxes):
+            return
+            
+        frame_bboxes = self.bounding_boxes[frame_idx]
+        
+        for bbox_idx, bbox in enumerate(frame_bboxes):
+            # Check if this class should be shown
+            if hasattr(self, 'class_checkboxes'):
+                if bbox.class_name in self.class_checkboxes:
+                    if not self.class_checkboxes[bbox.class_name].value:
+                        continue
+            
+            # Get box corners and edges
+            corners, edges = bbox.get_wireframe_edges()
+            
+            # Get class color
+            class_color = self._get_class_color(bbox.class_name)
+            
+            # Add wireframe lines
+            for edge in edges:
+                start_point = corners[edge[0]]
+                end_point = corners[edge[1]]
+                
+                # Create line geometry
+                line_points = np.array([start_point, end_point])
+                
+                self.bbox_handles.append(
+                    self.server.add_spline_catmull_rom(
+                        name=f"/frames/{step}/bbox_{bbox_idx}_edge_{len(self.bbox_handles)}",
+                        positions=line_points,
+                        color=class_color,
+                        line_width=self.bbox_thickness_slider.value * 1000,  # Scale for visibility
+                        segments=2
+                    )
+                )
+            
+            # Add floating label
+            if self.show_labels.value:
+                label_text = f"{bbox.class_name.title()}\n{bbox.confidence:.2f}"
+                label_position = bbox.center + np.array([0, 0, bbox.dimensions[2]/2 + 0.1])  # Above the box
+                
+                self.label_handles.append(
+                    self.server.add_point_cloud(
+                        name=f"/frames/{step}/label_{bbox_idx}",
+                        points=label_position.reshape(1, 3),
+                        colors=np.array(class_color).reshape(1, 3),
+                        point_size=0.01,  # Very small, just for the label
+                    )
+                )
+                
+                # Add text label (if viser supports it)
+                try:
+                    self.label_handles.append(
+                        self.server.add_text(
+                            name=f"/frames/{step}/text_{bbox_idx}",
+                            text=label_text,
+                            position=label_position,
+                            color=class_color
+                        )
+                    )
+                except:
+                    pass  # Fallback if text labels not supported
 
     def get_camera_state(self, client: viser.ClientHandle) -> CameraState:
         camera = client.camera
@@ -462,23 +554,6 @@ class PointCloudViewer:
         ro = np.broadcast_to(ro, (h, w, 3))
         ray_map = np.concatenate([ro, rd], axis=-1)
         return ray_map
-
-    def set_camera_loc(camera, pose, K):
-        """
-        pose: 4x4 matrix
-        K: 3x3 matrix
-        """
-        fx, fy = K[0, 0], K[1, 1]
-        cx, cy = K[0, 2], K[1, 2]
-        aspect = float(cx) / float(cy)
-        fov = 2 * np.arctan(2 * cx / fx)
-        wxyz_xyz = tf.SE3.from_matrix(pose).wxyz_xyz
-        wxyz = wxyz_xyz[:4]
-        xyz = wxyz_xyz[4:]
-        camera.wxyz = wxyz
-        camera.position = xyz
-        camera.fov = fov
-        camera.aspect = aspect
 
     def _connect_client(self, client: viser.ClientHandle):
         from src.dust3r.inference import inference_step
@@ -522,7 +597,6 @@ class PointCloudViewer:
                     raymap = torch.from_numpy(self.get_ray_map(pose, 224, 224, intrins))[
                         None
                     ].float()
-                
                 
                 view = {
                     "img": torch.full((1, 3, 384, 512), torch.nan) if self.size==512 else torch.full((1, 3, 224, 224), torch.nan),
@@ -576,7 +650,6 @@ class PointCloudViewer:
 
     @staticmethod
     def set_color_border(image, border_width=5, color=[1, 0, 0]):
-
         image[:border_width, :, 0] = color[0]  # Red channel
         image[:border_width, :, 1] = color[1]  # Green channel
         image[:border_width, :, 2] = color[2]  # Blue channel
@@ -627,13 +700,11 @@ class PointCloudViewer:
         edge_color=[0.251, 0.702, 0.902],
         set_border_color=False,
     ):
-
         pred_pts = pc.reshape(-1, 3)  # [N, 3]
 
         if set_border_color and edge_color is not None:
             color = self.set_color_border(color[0], color=edge_color)
         if np.isnan(color).any():
-
             color = np.zeros((pred_pts.shape[0], 3))
             color[:, 2] = 1
         else:
@@ -645,24 +716,8 @@ class PointCloudViewer:
         return pred_pts, color
 
     def add_pc(self, step):
-        pc = self.pcs[step]["pc"]
-        color = self.pcs[step]["color"]
-        conf = self.pcs[step]["conf"]
-        edge_color = self.pcs[step].get("edge_color", None)
-
-        pred_pts, color = self.parse_pc_data(
-            pc, color, conf, edge_color, set_border_color=True
-        )
-
-        self.vis_pts_list.append(pred_pts)
-        self.pc_handles.append(
-            self.server.add_point_cloud(
-                name=f"/frames/{step}/pred_pts",
-                points=pred_pts,
-                colors=color,
-                point_size=0.005,
-            )
-        )
+        """Enhanced add_pc method with mask support"""
+        self._add_pc_with_mode(step)
 
     def add_camera(self, step):
         cam = self.cam_dict
@@ -734,8 +789,31 @@ class PointCloudViewer:
             with self.server.atomic():
                 self.frame_nodes[current_timestep].visible = True
                 self.frame_nodes[prev_timestep].visible = False
+                
+                # 🔥 CRITICAL FIX: Update bounding boxes for current frame
+                if self.bbox_mode_enabled:
+                    print(f"🔄 Switching to frame {current_timestep}, clearing old bboxes...")
+                    
+                    # Clear all existing bounding boxes
+                    for handle in self.bbox_handles:
+                        try:
+                            handle.remove()
+                        except:
+                            pass
+                    for handle in self.label_handles:
+                        try:
+                            handle.remove()
+                        except:
+                            pass
+                    self.bbox_handles.clear()
+                    self.label_handles.clear()
+                    
+                    # Add bounding boxes ONLY for current frame
+                    print(f"📦 Adding bboxes for frame {current_timestep}")
+                    self._add_bboxes_for_frame(current_timestep)
+                    
             prev_timestep = current_timestep
-            self.server.flush()  # Optional!
+            self.server.flush()
 
         self.server.add_frame(
             "/frames",
@@ -753,8 +831,26 @@ class PointCloudViewer:
             self.add_pc(step)
             if self.show_camera:
                 self.add_camera(step)
+            # Add bounding boxes for first frame initially
+            if i == 0 and self.bbox_mode_enabled:
+                self._add_bboxes_for_frame(step)
 
         prev_timestep = gui_timestep.value
+        
+        # Enhanced status message
+        print("\n" + "="*60)
+        print("🚀 ENHANCED POINT CLOUD VIEWER WITH 3D BOUNDING BOXES")
+        print("="*60)
+        print(f"🌐 View at: http://localhost:{self.port}")
+        if self.mask_mode_enabled:
+            print(f"🎨 Mask visualization modes available!")
+        if self.bbox_mode_enabled:
+            total_bboxes = sum(len(frame_bboxes) for frame_bboxes in self.bounding_boxes)
+            print(f"📦 {total_bboxes} 3D bounding boxes loaded!")
+        print(f"📊 Use sliders to adjust point size and visibility")
+        print(f"🎮 Use playback controls for animation")
+        print("="*60)
+        
         while True:
             if self.on_replay:
                 pass
@@ -775,3 +871,7 @@ class PointCloudViewer:
         self.animate()
         while True:
             time.sleep(10.0)
+
+
+# Create an alias for backward compatibility
+PointCloudViewer = Enhanced3DPointCloudViewer

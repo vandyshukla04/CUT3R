@@ -1,0 +1,161 @@
+================================================================================
+                    PHASE 1A: QUICK REFERENCE GUIDE
+================================================================================
+
+🎯 GOAL: Fix bbox size inconsistency across different camera viewpoints
+
+📁 FILES CHANGED:
+   ✓ demo_masks.py       (added species dimensions + new method)
+   ✓ PHASE1A_README.md   (comprehensive documentation)
+   ✓ PHASE1A_SUMMARY.md  (this summary)
+
+================================================================================
+                          WHAT WAS ADDED
+================================================================================
+
+1️⃣  SPECIES DATABASE (demo_masks.py lines 998-1028)
+   ┌─────────────────────────────────────────┐
+   │ self.animal_dimensions = {              │
+   │   'zebra': {length: 2.5, width: 0.7, …}│
+   │   'rhino': {length: 3.8, width: 1.5, …}│
+   │   'elephant': {length: 5.5, width: 2.5,…}│
+   │   'animal': {generic fallback}          │
+   │ }                                       │
+   └─────────────────────────────────────────┘
+
+2️⃣  NEW METHOD (lines 1085-1167)
+   compute_species_constrained_bbox()
+   
+   Algorithm:
+   ┌─────────────────────────────────────────┐
+   │ 1. Run PCA on visible points            │
+   │ 2. Estimate scale:                      │
+   │    scale = median(PCA_dims/species_dims)│
+   │ 3. Blend dimensions:                    │
+   │    final = 0.7×species + 0.3×PCA       │
+   │ 4. Adjust for ground plane (optional)   │
+   └─────────────────────────────────────────┘
+
+3️⃣  MODIFIED CALL (lines 1439-1444)
+   OLD: bbox_result = self.compute_oriented_bbox_pca(points)
+   NEW: bbox_result = self.compute_species_constrained_bbox(
+            points, class_name, ground_normal)
+
+================================================================================
+                        HOW TO USE / REVERT
+================================================================================
+
+🔧 TO ENABLE (default):
+   demo_masks.py line 1031:
+   self.use_species_constraints = True
+
+🔄 TO REVERT TO OLD BEHAVIOR:
+   demo_masks.py line 1031:
+   self.use_species_constraints = False
+
+⚙️  TO ADJUST BLEND:
+   demo_masks.py line 1032:
+   self.species_constraint_strength = 0.7  # 0.0-1.0
+   
+   0.0 = pure PCA (old behavior)
+   0.5 = 50/50 blend
+   1.0 = pure species dimensions
+
+================================================================================
+                          TESTING
+================================================================================
+
+🧪 RUN:
+   python demo_masks.py \
+       --seq_path examples/your_sequence \
+       --output_dir results/phase1a_test \
+       ... (your normal args)
+
+📊 CHECK CONSOLE FOR:
+   📏 Species: zebra | Scale: 0.73x |
+      PCA dims: [1.82, 0.51, 1.02] → Constrained: [1.79, 0.50, 1.01]
+
+✅ EXPECTED RESULTS:
+   • More consistent bbox sizes across viewpoints
+   • Realistic dimensions (zebra ≈2.5m, rhino ≈3.8m, elephant ≈5.5m)
+   • Less dramatic size changes frame-to-frame
+
+⚠️  STILL EXPECTED:
+   • Some flickering (Phase 1B/1C will address this)
+   • Rotation variations (not addressed yet)
+
+================================================================================
+                        TROUBLESHOOTING
+================================================================================
+
+❌ Boxes too large/small?
+   → Adjust dimensions in animal_dimensions dict (line 1002)
+   → OR lower constraint_strength to 0.5
+
+❌ Scale estimation looks wrong?
+   → Add debug print after line 1163:
+     print(f"🐾 Scale factors: {scale_factors}")
+
+❌ Still seeing huge variations?
+   → This is normal! Phase 1A only addresses viewpoint consistency
+   → Phase 1B (temporal fusion) will help
+   → Phase 1C (smoothing) will further stabilize
+
+================================================================================
+                         NEXT PHASES
+================================================================================
+
+📅 PHASE 1B: Temporal Point Accumulation
+   • Accumulate points from ±2-5 frames
+   • More complete 3D model → better fitting
+   • Reduces single-frame noise
+
+📅 PHASE 1C: Temporal Smoothing
+   • Kalman filter for bbox parameters
+   • Smooth transitions over time
+   • Final reduction of jitter
+
+================================================================================
+                          GIT WORKFLOW
+================================================================================
+
+📌 CURRENT BRANCH: phase1a-species-dimensions
+
+💾 TO COMMIT (when ready):
+   git commit -m "Phase 1A: Species-constrained bbox fitting"
+
+🔀 TO SWITCH BACK:
+   git checkout main  # or vandi_v1
+
+🌿 TO CREATE YOUR FORK:
+   git remote add fork https://github.com/your-username/CUT3R.git
+   git push fork phase1a-species-dimensions
+
+================================================================================
+                       QUICK FILE REFERENCE
+================================================================================
+
+📄 PHASE1A_README.md     - Full documentation (algorithms, examples)
+📄 PHASE1A_SUMMARY.md    - Implementation summary
+📄 PHASE1A_CHANGES.txt   - This quick reference (you are here!)
+📄 demo_masks.py         - Modified source code
+
+Lines to remember:
+  • 998-1028:   Animal dimensions database
+  • 1031:       Toggle ON/OFF
+  • 1032:       Constraint strength
+  • 1066-1083:  get_species_dimensions()
+  • 1085-1167:  compute_species_constrained_bbox()
+  • 1439-1444:  Modified bbox computation call
+
+================================================================================
+                          QUESTIONS?
+================================================================================
+
+1. Read PHASE1A_README.md first (comprehensive guide)
+2. Check console output (📏 Species: lines)
+3. Try toggling use_species_constraints = False to compare
+
+Happy testing! 🎉
+
+================================================================================

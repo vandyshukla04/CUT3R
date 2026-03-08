@@ -70,7 +70,7 @@ def loss_of_one_batch(
     if symmetrize_batch:
         batch = make_batch_symmetric(batch)
 
-    with torch.cuda.amp.autocast(enabled=not inference):
+    with torch.amp.autocast('cuda', enabled=not inference):
         if inference:
             output, state_args = model(batch, ret_state=True)
             preds, batch = output.ress, output.views
